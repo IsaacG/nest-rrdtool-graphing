@@ -1,0 +1,7 @@
+ZIPCODE = '12345'
+NEST_CLIENT_ID = 'xxxxxx'
+NEST_CLIENT_SECRET = 'xxxxxx'
+WUNDERGROUND_API_KEY = 'xxxxxx'
+ENVOY_SYSTEM_ID = 'xxxxxx'
+ENPHASE_KEY = 'xxxxxx'
+ENPHASE_USER_ID = 'xxxxxx'

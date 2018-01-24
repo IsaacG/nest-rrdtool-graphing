@@ -23,7 +23,7 @@ def=(
   'VDEF:ext_temp_min=ext_temperature,MINIMUM'
   'VDEF:ext_temp_max=ext_temperature,MAXIMUM'
   'VDEF:ext_temp_cur=ext_temperature,LAST'
-  'LINE2:ext_temperature#FF00FF:Ext Temp\t'
+  'LINE2:ext_temperature#FF00FF:Exterior Temp\t'
   'GPRINT:ext_temp_cur:\tCur %6.1lf F\t'
   'GPRINT:ext_temp_min:Min %6.1lf F\t'
   'GPRINT:ext_temp_max:Max %6.1lf F\t'
@@ -62,13 +62,19 @@ def=(
 rrdtool graph /tmp/nest_a.png --title 'Nest Thermostat' --height '400' "${flags[@]}" -P "${def[@]}" > /dev/null
 
 def=(
+  "DEF:power=${rrd}:solar_power:AVERAGE"
+  'LINE1:power#0000FF:Solar Power Production\n'
+)
+rrdtool graph /tmp/nest_b.png --height '150' "${flags[@]}" -P "${def[@]}" > /dev/null
+
+def=(
   "DEF:state=${rrd}:state:AVERAGE"
   'AREA:state#0000FF:HVAC\n'
   "DEF:fan=${rrd}:fan:AVERAGE"
   'LINE:fan#FF0000:Fan\n'
 )
-rrdtool graph /tmp/nest_b.png --height '150' "${flags[@]}" -P "${def[@]}" > /dev/null
+rrdtool graph /tmp/nest_c.png --height '150' "${flags[@]}" -P "${def[@]}" > /dev/null
 
-convert -append /tmp/nest_[ab].png "${out_dir}/nest.png"
+convert -append /tmp/nest_[abc].png "${out_dir}/nest.png"
 rm /tmp/nest_[ab].png
 

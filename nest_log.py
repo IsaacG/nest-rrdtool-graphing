@@ -8,11 +8,13 @@ rrdtool create $HOME/.xdg/data/nest_thermostat.rrd \
 'DS:humidity:GAUGE:600:0:100' \
 'DS:target:GAUGE:600:0:100' \
 'DS:mode:GAUGE:600:0:10' \
-'DS:state:ABSOLUTE:600:0:10' \
+'DS:state:GAUGE:600:0:10' \
 'DS:fan:GAUGE:600:0:1' \
 \
-'DS:ext_temperature:GAUGE:5400:0:100' \
-'DS:ext_humidity:GAUGE:5400:0:100' \
+'DS:ext_temperature:GAUGE:1500:0:100' \
+'DS:ext_humidity:GAUGE:1500:0:100' \
+\
+'DS:solar_power:GAUGE:600:0:U' \
 \
 'RRA:AVERAGE:0.5:1:2016' \
 'RRA:AVERAGE:0.5:1:4032' \
@@ -23,35 +25,30 @@ rrdtool create $HOME/.xdg/data/nest_thermostat.rrd \
 'RRA:AVERAGE:0.5:48:4380'
 """
 
+import datetime
 import enum
 import nest
 import os
 import requests
 import rrdtool
-import secrets
 import sys
 import time
 
-
-# Configs/secrets
-ZIPCODE = secrets.ZIPCODE
-NEST_CLIENT_ID = secrets.NEST_CLIENT_ID
-NEST_CLIENT_SECRET = secrets.NEST_CLIENT_SECRET
-WUNDERGROUND_API_KEY = secrets.WUNDERGROUND_API_KEY
+import nest_secrets as secrets
 
 
 class NestLogger(object):
-  CLIENT_ID = NEST_CLIENT_ID
-  CLIENT_SECRET = NEST_CLIENT_SECRET
   ACCESS_TOKEN_CACHE_FILE = '%s/.xdg/cache/nest.json' % os.environ['HOME']
 
-  def __init__(self, rrd):
+  def __init__(self, client_id, secret):
+    self.client_id = client_id
+    self.secret = secret
+
     self.Auth()
-    self.rrd = rrd
 
   def Fetch(self):
     self.api = nest.Nest(
-      client_id=self.CLIENT_ID, client_secret=self.CLIENT_SECRET,
+      client_id=self.client_id, client_secret=self.secret,
       access_token_cache_file=self.ACCESS_TOKEN_CACHE_FILE) 
 
   def Auth(self):
@@ -63,23 +60,17 @@ class NestLogger(object):
       pin = input("PIN: ")
       napi.request_token(pin)
 
-  def Log(self):
+  def GetData(self):
+    self.Fetch()
     device = self.api.structures[0].thermostats[0]
-    rrd_values = [
-      'N',  # Timestamp=now
+    return [
       device.temperature,
       device.humidity,
       device.target,
       HvacMode[device.mode.upper()].value,
       0 if device.hvac_state == 'off' else 1,
       1 if device.fan else 0,
-      'U', 'U',  # Wunderground
     ]
-    self.rrd.Update(rrd_values)
-
-  def Update(self):
-    self.Fetch()
-    self.Log()
 
 
 class RddTool(object):
@@ -90,7 +81,11 @@ class RddTool(object):
     self.last_graph = 0
 
   def Update(self, data):
-    rrdtool.update(self.RRD, ':'.join([str(v) for v in data]))
+    data.insert(0, 'N')
+    data = ':'.join([str(v) for v in data])
+    with open('/tmp/nest_rdd.log', 'a') as f:
+      print('%s: Updating RRD with %s' % (datetime.datetime.now(), data), file=f)
+    rrdtool.update(self.RRD, data)
     self.MaybeGraph()
 
   def MaybeGraph(self):
@@ -102,45 +97,68 @@ class RddTool(object):
 
 
 class WUnderground(object):
-  KEY = WUNDERGROUND_API_KEY
   MIN_WAIT = 5 * 60   # Wait at least 5 min between fetches
-  FRESHNESS = 15 * 60 # Within 15m is still fresh
+  FRESHNESS = 10 * 60 # Within 15m is still fresh
   ENDPOINT = 'http://api.wunderground.com/api/%s/conditions/q/%s.json'
 
-  def __init__(self, rrd):
+  def __init__(self, zipcode, key):
     self.last_fetch = 0
-    self.rrd = rrd
+    self.zipcode = zipcode
+    self.key = key
   
   def Fetch(self):
     self.last_fetch = time.time()
-    resp = requests.get(self.ENDPOINT % (self.KEY, ZIPCODE))
+    resp = requests.get(self.ENDPOINT % (self.key, self.zipcode))
     self.data = resp.json()['current_observation']
 
-  def Log(self):
-    ext_temperature = self.data['temp_f']
-    ext_humidity = self.data['relative_humidity'].rstrip('%')
-    timestamp = self.data['local_epoch']
-
-    rrd_values = [
-      'N',  # It would be nice to use the timestamp but we can only add later values to RRD
-      'U', 'U', 'U', 'U', 'U', 'U',  # Nest data
-      ext_temperature,
-      ext_humidity,
-    ]
-    self.rrd.Update(rrd_values)
-
-  def MaybeUpdate(self):
+  def GetData(self):
+    fetch = True
     if (time.time() - self.last_fetch) < self.MIN_WAIT:
-      return
+      fetch = False
 
     if self.last_fetch and (time.time() - int(self.data['local_epoch'])) < self.FRESHNESS:
-      return
+      fetch = False
 
-    self.Fetch()
-    self.Log()
+    if fetch:
+      self.Fetch()
 
-  def Update(self):
-    self.MaybeUpdate()
+    ext_temperature = self.data['temp_f']
+    ext_humidity = self.data['relative_humidity'].rstrip('%')
+    return [ext_temperature, ext_humidity]
+
+
+class Enphase(object):
+  ENDPOINT = 'https://api.enphaseenergy.com/api/v2/systems/%s/summary'
+  MIN_WAIT = 5 * 60   # Wait at least 5 min between fetches
+  ZERO_WAIT = 15 * 60   # Wait 15 min is we're at zero power
+
+  def __init__(self, key, user_id, system_id):
+    self.last_fetch = 0
+    self.data = None
+    self.key = key
+    self.user_id = user_id
+    self.system_id = system_id
+  
+  def Fetch(self):
+    self.last_fetch = time.time()
+    data = {'key': self.key, 'user_id': self.user_id}
+    resp = requests.get(self.ENDPOINT % self.system_id, data=data)
+    self.data = resp.json()['current_power']
+
+  def GetData(self):
+    fetch = True
+    if self.data is not None:
+      if self.data == 0:
+        wait = self.ZERO_WAIT
+      else:
+        wait = self.MIN_WAIT
+      if (time.time() - self.last_fetch) < wait:
+        fetch = False
+
+    if fetch:
+      self.Fetch()
+
+    return [self.data]
 
 
 class HvacMode(enum.Enum):
@@ -157,8 +175,9 @@ class Daemon(object):
 
   def __init__(self):
     self.rrd = RddTool()
-    self.nest = NestLogger(self.rrd)
-    self.wunderground = WUnderground(self.rrd)
+    self.nest = NestLogger(secrets.NEST_CLIENT_ID, secrets.NEST_CLIENT_SECRET)
+    self.wunderground = WUnderground(secrets.ZIPCODE, secrets.WUNDERGROUND_API_KEY)
+    self.enphase = Enphase(secrets.ENPHASE_KEY, secrets.ENPHASE_USER_ID, secrets.ENVOY_SYSTEM_ID)
 
   def Run(self):
     while True:
@@ -166,14 +185,22 @@ class Daemon(object):
       time.sleep(self.TICK_LEN)
     
   def RunOnce(self):
-    self.nest.Update()
-    self.wunderground.Update()
+    data = (
+      self.nest.GetData()
+      + self.wunderground.GetData()
+      + self.enphase.GetData()
+    )
+    self.rrd.Update(data)
   
 
 def main():
-  Daemon().Run()
+  if 'once' in sys.argv:
+    Daemon().RunOnce()
+  else:
+    Daemon().Run()
 
 
 if __name__ == '__main__':
   main()
 
+# vim:ts=2:sw=2:expandtab
