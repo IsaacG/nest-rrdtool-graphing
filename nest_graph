@@ -2,10 +2,22 @@
 
 out_dir=/usr/share/nginx/html/a/
 
-flags=( --width '900' --full-size-mode --start end-1d --x-grid MINUTE:30:HOUR:1:HOUR:1:0:%l%p --y-grid 5:1 --right-axis 1:0 --slope-mode )
+common_flags=( --width '900' --full-size-mode --right-axis 1:0 --slope-mode )
 rrd=$HOME/.xdg/data/nest_thermostat.rrd
 
-def=(
+g_count=1
+make_graph() {
+  declare -A opts=( [d]=1 [w]=7 [m]=30 )
+  for i in "${!opts[@]}"; do
+    flags=("${common_flags[@]}" "${graph_flags[@]}" -P "${graph_def[@]}")
+    [[ $i = "d" ]] && flags+=(--x-grid MINUTE:30:HOUR:1:HOUR:1:0:%l%p)
+    filename="/tmp/nest_${i}_${g_count}.png"
+    rrdtool graph "$filename" --start "end-${opts[$i]}d" "${flags[@]}" > /dev/null
+  done
+  ((g_count++))
+}
+
+graph_def=(
   "DEF:temp=${rrd}:temperature:AVERAGE"
   'VDEF:temp_avg=temp,AVERAGE'
   'VDEF:temp_min=temp,MINIMUM'
@@ -42,39 +54,48 @@ def=(
   'GPRINT:hum_avg:Avg %4.0lf%%\t'
   'COMMENT:\n'
 
-  "DEF:ext_humidity=${rrd}:ext_humidity:AVERAGE"
-  'VDEF:ext_hum_avg=ext_humidity,AVERAGE'
-  'VDEF:ext_hum_min=ext_humidity,MINIMUM'
-  'VDEF:ext_hum_max=ext_humidity,MAXIMUM'
-  'VDEF:ext_hum_cur=ext_humidity,LAST'
-  'LINE1:ext_humidity#00FFFF:Exterior Humidity\t'
-  'GPRINT:ext_hum_cur:Cur %4.0lf%%\t'
-  'GPRINT:ext_hum_min:Min %4.0lf%%\t'
-  'GPRINT:ext_hum_max:Max %4.0lf%%\t'
-  'GPRINT:ext_hum_avg:Avg %4.0lf%%\t'
-  'COMMENT:\n'
+  # "DEF:ext_humidity=${rrd}:ext_humidity:AVERAGE"
+  # 'VDEF:ext_hum_avg=ext_humidity,AVERAGE'
+  # 'VDEF:ext_hum_min=ext_humidity,MINIMUM'
+  # 'VDEF:ext_hum_max=ext_humidity,MAXIMUM'
+  # 'VDEF:ext_hum_cur=ext_humidity,LAST'
+  # 'LINE1:ext_humidity#00FFFF:Exterior Humidity\t'
+  # 'GPRINT:ext_hum_cur:Cur %4.0lf%%\t'
+  # 'GPRINT:ext_hum_min:Min %4.0lf%%\t'
+  # 'GPRINT:ext_hum_max:Max %4.0lf%%\t'
+  # 'GPRINT:ext_hum_avg:Avg %4.0lf%%\t'
+  # 'COMMENT:\n'
 
   "DEF:target=${rrd}:target:AVERAGE"
   'LINE1:target#555500:Target'
   'COMMENT:\n'
-
 )
-rrdtool graph /tmp/nest_a.png --title 'Nest Thermostat' --height '400' "${flags[@]}" -P "${def[@]}" > /dev/null
+graph_flags=(--height '400' --y-grid 5:1 )
+make_graph
 
-def=(
+graph_def=(
+  "DEF:state=${rrd}:state:AVERAGE"
+  "VDEF:state_avg=state,AVERAGE"
+  "CDEF:time=state,POP,state_avg,24,*"
+  'AREA:state#0000FF:HVAC  '
+  'GPRINT:time:AVERAGE:%2.1lf hours/day\t'
+  "DEF:fan=${rrd}:fan:AVERAGE"
+  'LINE:fan#FF0000:Fan\t\t'
+  "DEF:away=${rrd}:away:AVERAGE"
+  'LINE:away#00FF00:Away    '
+)
+graph_flags=(--height '100' --y-grid 1:1 --upper-limit 1 --rigid)
+make_graph
+
+graph_def=(
   "DEF:power=${rrd}:solar_power:AVERAGE"
   'LINE1:power#0000FF:Solar Power Production\n'
 )
-rrdtool graph /tmp/nest_b.png --height '150' "${flags[@]}" -P "${def[@]}" > /dev/null
+graph_flags=(--height '150' --y-grid 100:2)
+make_graph
 
-def=(
-  "DEF:state=${rrd}:state:AVERAGE"
-  'AREA:state#0000FF:HVAC\n'
-  "DEF:fan=${rrd}:fan:AVERAGE"
-  'LINE:fan#FF0000:Fan\n'
-)
-rrdtool graph /tmp/nest_c.png --height '150' "${flags[@]}" -P "${def[@]}" > /dev/null
-
-convert -append /tmp/nest_[abc].png "${out_dir}/nest.png"
-rm /tmp/nest_[ab].png
+convert -append /tmp/nest_d_?.png "${out_dir}/nest.png"
+convert -append /tmp/nest_w_?.png "${out_dir}/nest_w.png"
+convert -append /tmp/nest_m_?.png "${out_dir}/nest_m.png"
+rm /tmp/nest_[dwm]_?.png
 

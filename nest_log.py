@@ -10,6 +10,7 @@ rrdtool create $HOME/.xdg/data/nest_thermostat.rrd \
 'DS:mode:GAUGE:600:0:10' \
 'DS:state:GAUGE:600:0:10' \
 'DS:fan:GAUGE:600:0:1' \
+'DS:away:GAUGE:600:0:1' \
 \
 'DS:ext_temperature:GAUGE:1500:0:100' \
 'DS:ext_humidity:GAUGE:1500:0:100' \
@@ -43,33 +44,42 @@ class NestLogger(object):
   def __init__(self, client_id, secret):
     self.client_id = client_id
     self.secret = secret
+    self._last = None
 
     self.Auth()
 
   def Fetch(self):
     self.api = nest.Nest(
       client_id=self.client_id, client_secret=self.secret,
-      access_token_cache_file=self.ACCESS_TOKEN_CACHE_FILE) 
+      access_token_cache_file=self.ACCESS_TOKEN_CACHE_FILE)
 
   def Auth(self):
     self.Fetch()
     # Nest data
-    if self.api.authorization_required:
+    try:
+      authorization_required = self.api.authorization_required
+    except requests.exceptions.ConnectionError:
+      raise Exception('Connection error. Bail and retry later.')
+
+    if authorization_required:
       raise Exception('Needs you to authorize!')
-      print('Go to ' + napi.authorize_url + ' to authorize, then enter PIN below')
+      print('Go to ' + self.api.authorize_url + ' to authorize, then enter PIN below')
       pin = input("PIN: ")
-      napi.request_token(pin)
+      self.api.request_token(pin)
 
   def GetData(self):
     self.Fetch()
-    device = self.api.structures[0].thermostats[0]
+    if self.api.structures and self.api.structures[0].thermostats:
+      self._last = self.api.structures[0].thermostats[0]
+    device = self._last
     return [
       device.temperature,
       device.humidity,
       device.target,
-      HvacMode[device.mode.upper()].value,
+      HvacMode[device.mode.upper().replace('-', '')].value,
       0 if device.hvac_state == 'off' else 1,
       1 if device.fan else 0,
+      1 if self.api.structures[0].away else 0,
     ]
 
 
@@ -105,11 +115,12 @@ class WUnderground(object):
     self.last_fetch = 0
     self.zipcode = zipcode
     self.key = key
-  
+
   def Fetch(self):
     self.last_fetch = time.time()
     resp = requests.get(self.ENDPOINT % (self.key, self.zipcode))
-    self.data = resp.json()['current_observation']
+    if 'current_observation' in resp.json():
+      self.data = resp.json()['current_observation']
 
   def GetData(self):
     fetch = True
@@ -120,7 +131,10 @@ class WUnderground(object):
       fetch = False
 
     if fetch:
-      self.Fetch()
+      try:
+        self.Fetch()
+      except:
+        pass
 
     ext_temperature = self.data['temp_f']
     ext_humidity = self.data['relative_humidity'].rstrip('%')
@@ -128,35 +142,28 @@ class WUnderground(object):
 
 
 class Enphase(object):
-  ENDPOINT = 'https://api.enphaseenergy.com/api/v2/systems/%s/summary'
-  MIN_WAIT = 5 * 60   # Wait at least 5 min between fetches
-  ZERO_WAIT = 15 * 60   # Wait 15 min is we're at zero power
+  ENDPOINT = 'http://%s/api/v1/production'
 
-  def __init__(self, key, user_id, system_id):
-    self.last_fetch = 0
+  notes = """
+   http get LOCAL_IP/production.json => "wNow":
+   LOCAL_IP/backbone/application.js
+   LOCAL_IP/inventory.json
+
+   LOCAL_IP/api/v1/production
+
+   https://thecomputerperson.wordpress.com/2016/08/03/enphase-envoy-s-data-scraping/
+   """
+
+  def __init__(self, local_ip):
     self.data = None
-    self.key = key
-    self.user_id = user_id
-    self.system_id = system_id
-  
+    self.local_ip = local_ip
+
   def Fetch(self):
-    self.last_fetch = time.time()
-    data = {'key': self.key, 'user_id': self.user_id}
-    resp = requests.get(self.ENDPOINT % self.system_id, data=data)
-    self.data = resp.json()['current_power']
+    resp = requests.get(self.ENDPOINT % self.local_ip)
+    self.data = resp.json()['wattsNow']
 
   def GetData(self):
-    fetch = True
-    if self.data is not None:
-      if self.data == 0:
-        wait = self.ZERO_WAIT
-      else:
-        wait = self.MIN_WAIT
-      if (time.time() - self.last_fetch) < wait:
-        fetch = False
-
-    if fetch:
-      self.Fetch()
+    self.Fetch()
 
     return [self.data]
 
@@ -166,7 +173,7 @@ class HvacMode(enum.Enum):
   ECO = 1
   HEAT = 2
   COOL = 3
-  BOTH = 4
+  HEATCOOL = 4
 
 
 class Daemon(object):
@@ -177,13 +184,13 @@ class Daemon(object):
     self.rrd = RddTool()
     self.nest = NestLogger(secrets.NEST_CLIENT_ID, secrets.NEST_CLIENT_SECRET)
     self.wunderground = WUnderground(secrets.ZIPCODE, secrets.WUNDERGROUND_API_KEY)
-    self.enphase = Enphase(secrets.ENPHASE_KEY, secrets.ENPHASE_USER_ID, secrets.ENVOY_SYSTEM_ID)
+    self.enphase = Enphase(secrets.ENPHASE_LOCAL_IP)
 
   def Run(self):
     while True:
       self.RunOnce()
       time.sleep(self.TICK_LEN)
-    
+
   def RunOnce(self):
     data = (
       self.nest.GetData()
@@ -191,7 +198,7 @@ class Daemon(object):
       + self.enphase.GetData()
     )
     self.rrd.Update(data)
-  
+
 
 def main():
   if 'once' in sys.argv:
