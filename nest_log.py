@@ -79,7 +79,7 @@ class NestLogger(object):
       HvacMode[device.mode.upper().replace('-', '')].value,
       0 if device.hvac_state == 'off' else 1,
       1 if device.fan else 0,
-      1 if self.api.structures[0].away else 0,
+      1 if device.structure.away == 'away' else 0,
     ]
 
 
